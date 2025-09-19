@@ -1,10 +1,10 @@
 
 import argparse
-from github import search_github, create_pr
+from github_utils import search_github, create_pr
 from google.cloud import secretmanager
 
 # TODO: Replace with your Google Cloud project ID and Secret ID
-PROJECT_ID = "your-gcp-project-id"
+PROJECT_ID = "fsergio-cad"
 SECRET_ID = "github_token"
 
 def get_github_token():

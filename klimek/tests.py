@@ -1,9 +1,9 @@
 
 import unittest
 import os
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from utils import apply_changes
-from github import search_github, create_pr
+from github_utils import search_github, create_pr
 
 class TestApplyChanges(unittest.TestCase):
 
@@ -25,20 +25,16 @@ class TestApplyChanges(unittest.TestCase):
 
 class TestSearchGithub(unittest.TestCase):
 
-    @patch("github.requests.get")
-    def test_search_github(self, mock_get):
-        # Create a mock response object
-        mock_response = unittest.mock.Mock()
-        mock_response.json.return_value = {
-            "items": [
-                {
-                    "repository": {
-                        "html_url": "https://github.com/test/test"
-                    }
-                }
-            ]
-        }
-        mock_get.return_value = mock_response
+    @patch("github_utils.Github")
+    def test_search_github(self, mock_github):
+        # Create a mock Github object
+        mock_g = MagicMock()
+        mock_github.return_value = mock_g
+
+        # Create a mock search result
+        mock_result = MagicMock()
+        mock_result.repository.html_url = "https://github.com/test/test"
+        mock_g.search_code.return_value = [mock_result]
 
         # Search for a known API call
         results = search_github("requests.get", "test")
@@ -48,25 +44,54 @@ class TestSearchGithub(unittest.TestCase):
 
 class TestCreatePr(unittest.TestCase):
 
-    @patch("github.subprocess.run")
-    @patch("github.requests.post")
-    def test_create_pr(self, mock_post, mock_run):
-        # Create a mock response object
-        mock_response = unittest.mock.Mock()
-        mock_response.raise_for_status.return_value = None
-        mock_post.return_value = mock_response
+    @patch("github_utils.Github")
+    def test_create_pr(self, mock_github):
+        # Create a mock Github object
+        mock_g = MagicMock()
+        mock_github.return_value = mock_g
 
-        # Create a mock subprocess object
-        mock_run.return_value = None
+        # Create a mock user
+        mock_user = MagicMock()
+        mock_user.login = "testuser"
+        mock_g.get_user.return_value = mock_user
+        
+        # Create a mock repo
+        mock_repo = MagicMock()
+        mock_g.get_repo.return_value = mock_repo
+
+        # Create a mock fork
+        mock_fork = MagicMock()
+        mock_user.create_fork.return_value = mock_fork
+
+        # Create a mock branch
+        mock_branch = MagicMock()
+        mock_branch.commit.sha = "testsha"
+        mock_fork.get_branch.return_value = mock_branch
+
+        # Create a mock file
+        mock_file = MagicMock()
+        mock_file.type = "file"
+        mock_file.decoded_content = b"old"
+        mock_file.path = "test.py"
+        mock_file.sha = "testsha"
+        mock_fork.get_contents.return_value = [mock_file]
+
 
         # Create a pull request
         create_pr("https://github.com/test/test", "old", "new", "main", "test", "test")
 
-        # Check that the subprocess was called correctly
-        self.assertEqual(mock_run.call_count, 5)
+        # Check that the fork was created
+        mock_user.create_fork.assert_called_once_with(mock_repo)
+        
+        # Check that the branch was created
+        mock_fork.create_git_ref.assert_called_once()
 
-        # Check that the post request was called correctly
-        self.assertEqual(mock_post.call_count, 1)
+        # Check that the file was updated
+        mock_fork.update_file.assert_called_once()
+
+        # Check that the PR was created
+        mock_repo.create_pull.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
