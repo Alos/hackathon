@@ -56,10 +56,7 @@ def checkout_repository(repo_url: str) -> dict:
     try:
         repo_name = repo_url.split('/')[-1]
         temp_dir = tempfile.mkdtemp()
-        # We need to inject the token into the URL for private repos.
-        # https://<token>@github.com/owner/repo.git
-        authenticated_repo_url = repo_url.replace("https://", f"https://{GITHUB_TOKEN}@") + ".git"
-        Repo.clone_from(authenticated_repo_url, temp_dir)
+        Repo.clone_from(repo_url + ".git", temp_dir, env={"GIT_USERNAME": "x-access-token", "GIT_PASSWORD": GITHUB_TOKEN})
         checked_out_repos[repo_name] = temp_dir
         return {"status": "success", "local_path": temp_dir, "repo_name": repo_name}
     except Exception as e:
@@ -202,13 +199,12 @@ def commit_and_create_pr(repo_name: str, commit_message: str, pr_title: str, pr_
 
         # Push changes with authentication
         origin = repo.remote(name='origin')
-        remote_url = origin.url
-        authenticated_url = remote_url.replace("https://", f"https://x-access-token:{GITHUB_TOKEN}@")
-        origin.set_url(authenticated_url)
-        origin.push(refspec=f'{branch_name}:{branch_name}')
+        with repo.git.custom_environment(GIT_USERNAME='x-access-token', GIT_PASSWORD=GITHUB_TOKEN):
+            origin.push(refspec=f'{branch_name}:{branch_name}')
 
         # Create a pull request
         g = Github(GITHUB_TOKEN)
+        remote_url = origin.url
         owner_repo = remote_url.split('/')[-2:]
         owner, repo_name_from_url = owner_repo[0], owner_repo[1].replace('.git', '')
         
