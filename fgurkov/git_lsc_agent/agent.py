@@ -1,7 +1,10 @@
 from google.adk.agents import Agent
 import os
 import base64
+import re
+import glob
 import shutil
+import sys
 import tempfile
 from github import Github
 from git import Repo
@@ -25,7 +28,7 @@ def list_repositories()->dict:
         repos = user.get_repos()
         
         # Create a list of dictionaries, where each dictionary contains the repo name and URL
-        repo_data = [{"name": repo.name, "url": repo.html_url} for repo in repos]
+        repo_data = [{"name": repo.name, "repo_url": repo.html_url} for repo in repos]
         
         return {
             "status": "success",
@@ -49,8 +52,10 @@ def checkout_repository(repo_url: str) -> dict:
     try:
         owner, repo_name = repo_url.strip("/").split("/")[-2:]
     except ValueError:
-        print(f"Error: Invalid GitHub repository URL: {repo_url}", file=sys.stderr)
-        sys.exit(1)
+        return {
+            "status": "error",
+            "message": f"Invalid GitHub repository URL format: {repo_url}. Expected format is 'owner/repo' or a full GitHub URL."
+        }
 
     try:
         g = Github(GITHUB_TOKEN)
@@ -106,10 +111,51 @@ def _check_file_content(item, temp_dir):
         return {"status": "error", "error_message": str(e)}
 
 
+def refactor_files_by_pattern(local_path: str, file_pattern: str, regex_pattern: str, replacement_string: str) -> dict:
+    """
+    Applies a regex-based refactoring to all files matching a pattern in a checked-out repository.
+
+    Args:
+        local_path: The local path to the checked-out repository.
+        file_pattern: The glob pattern to find files to refactor (e.g., '*.py', 'src/**/*.js').
+        regex_pattern: The regex pattern to search for.
+        replacement_string: The string to replace the matched pattern with.
+
+    Returns:
+        A dictionary with a 'status' key ('success' or 'error') and a 'message' key.
+    """
+    try:
+        # Create the full search path by joining local_path and file_pattern
+        search_path = os.path.join(local_path, file_pattern)
+        
+        # Find all files matching the pattern
+        files_to_refactor = glob.glob(search_path, recursive=True)
+        
+        if not files_to_refactor:
+            return {"status": "success", "message": f"No files found matching pattern: {file_pattern}"}
+
+        refactored_files = []
+        for file_path in files_to_refactor:
+            if os.path.isfile(file_path):
+                with open(file_path, 'r') as f:
+                    content = f.read()
+
+                new_content = re.sub(regex_pattern, replacement_string, content)
+
+                if content != new_content:
+                    with open(file_path, 'w') as f:
+                        f.write(new_content)
+                    refactored_files.append(file_path)
+
+        return {"status": "success", "message": f"Refactored {len(refactored_files)} files.", "refactored_files": refactored_files}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 root_agent = Agent(
     name="git_lsc_agent",
     model="gemini-2.0-flash",
-    description="Agent to answer questions about the time and weather in a city.",
-    instruction="I can answer your questions about the time and weather in a city.",
-    tools=[list_repositories, checkout_repository]
+    description="An agent that can list a user's GitHub repositories and check them out to a local directory.",
+    instruction="I can help you list your GitHub repositories and check them out. Please provide the repository URL when you want to check out a repository. You can get the URL by listing the repositories first.",
+    tools=[list_repositories, checkout_repository, refactor_files_by_pattern]
 )
