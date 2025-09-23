@@ -3,6 +3,7 @@ import os
 import base64
 import re
 import glob
+import uuid
 import shutil
 import sys
 import tempfile
@@ -14,6 +15,8 @@ GITHUB_TOKEN = os.getenv("HACKATHON_GITHUB_TOKEN")
 
 if not GITHUB_TOKEN:
     raise ValueError("Please set the GITHUB_TOKEN environment variable.")
+
+checked_out_repos = {}
 
 def list_repositories()->dict:
     """
@@ -45,31 +48,21 @@ def checkout_repository(repo_url: str) -> dict:
     """
     Clones a GitHub repository to a temporary directory and returns the path.
     Args:
-        repo_url: The url of the repository (e.g., 'user/repo-url').
+        repo_url: The url of the repository (e.g., 'https://github.com/user/repo-url').
     Returns:
         dict: A dictionary containing the local file system location of the repo with a 'status' key ('success' or 'error') and a 'local_path' key with the directory if successful, or an 'error_message' if an error occurred.
     """
+    global checked_out_repos
     try:
-        owner, repo_name = repo_url.strip("/").split("/")[-2:]
-    except ValueError:
-        return {
-            "status": "error",
-            "message": f"Invalid GitHub repository URL format: {repo_url}. Expected format is 'owner/repo' or a full GitHub URL."
-        }
-
-    try:
-        g = Github(GITHUB_TOKEN)
-        repo = g.get_repo(f"{owner}/{repo_name}")
-        contents = repo.get_contents("")
-        
-        # Create a temporary directory
+        repo_name = repo_url.split('/')[-1]
         temp_dir = tempfile.mkdtemp()
-
-        _checkout_directory(contents, repo, temp_dir)        
-        
-        return {"status": "success", "local_path": temp_dir}
+        # We need to inject the token into the URL for private repos.
+        # https://<token>@github.com/owner/repo.git
+        authenticated_repo_url = repo_url.replace("https://", f"https://{GITHUB_TOKEN}@") + ".git"
+        Repo.clone_from(authenticated_repo_url, temp_dir)
+        checked_out_repos[repo_name] = temp_dir
+        return {"status": "success", "local_path": temp_dir, "repo_name": repo_name}
     except Exception as e:
-        # Clean up the temp directory on error
         if 'temp_dir' in locals() and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         return {"status": "error", "message": str(e)}
@@ -111,12 +104,12 @@ def _check_file_content(item, temp_dir):
         return {"status": "error", "error_message": str(e)}
 
 
-def refactor_files_by_pattern(local_path: str, file_pattern: str, regex_pattern: str, replacement_string: str) -> dict:
+def refactor_files_by_pattern(repo_name: str, file_pattern: str, regex_pattern: str, replacement_string: str) -> dict:
     """
     Applies a regex-based refactoring to all files matching a pattern in a checked-out repository.
 
     Args:
-        local_path: The local path to the checked-out repository.
+        repo_name: The name of the repository to refactor.
         file_pattern: The glob pattern to find files to refactor (e.g., '*.py', 'src/**/*.js').
         regex_pattern: The regex pattern to search for.
         replacement_string: The string to replace the matched pattern with.
@@ -124,6 +117,10 @@ def refactor_files_by_pattern(local_path: str, file_pattern: str, regex_pattern:
     Returns:
         A dictionary with a 'status' key ('success' or 'error') and a 'message' key.
     """
+    local_path = checked_out_repos.get(repo_name)
+    if not local_path:
+        return {"status": "error", "message": f"Repository '{repo_name}' not found. Please check it out first."}
+
     try:
         # Create the full search path by joining local_path and file_pattern
         search_path = os.path.join(local_path, file_pattern)
@@ -152,10 +149,102 @@ def refactor_files_by_pattern(local_path: str, file_pattern: str, regex_pattern:
         return {"status": "error", "message": str(e)}
 
 
+def show_diff(repo_name: str) -> dict:
+    """
+    Shows the diff of a checked-out local repository.
+
+    Args:
+        repo_name: The name of the repository to show the diff for.
+
+    Returns:
+        A dictionary with a 'status' key ('success' or 'error'), a 'diff' key with the diff content, and a 'message' key.
+    """
+    local_path = checked_out_repos.get(repo_name)
+    if not local_path:
+        return {"status": "error", "message": f"Repository '{repo_name}' not found. Please check it out first."}
+
+    try:
+        repo = Repo(local_path)
+        diff = repo.git.diff()
+        return {"status": "success", "diff": diff}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+def commit_and_create_pr(repo_name: str, commit_message: str, pr_title: str, pr_body: str) -> dict:
+    """
+    Commits changes to the local repository and creates a pull request.
+
+    Args:
+        repo_name: The name of the repository.
+        commit_message: The commit message.
+        pr_title: The title of the pull request.
+        pr_body: The body of the pull request.
+
+    Returns:
+        A dictionary with a 'status' key ('success' or 'error') and a 'message' or 'pr_url' key.
+    """
+    local_path = checked_out_repos.get(repo_name)
+    if not local_path:
+        return {"status": "error", "message": f"Repository '{repo_name}' not found. Please check it out first."}
+
+    try:
+        repo = Repo(local_path)
+        
+        # Create a new branch
+        branch_name = f"refactor-{uuid.uuid4().hex[:8]}"
+        repo.create_head(branch_name)
+        repo.heads[branch_name].checkout()
+
+        # Add and commit changes
+        repo.git.add(A=True)
+        repo.index.commit(commit_message)
+
+        # Push changes with authentication
+        origin = repo.remote(name='origin')
+        remote_url = origin.url
+        authenticated_url = remote_url.replace("https://", f"https://x-access-token:{GITHUB_TOKEN}@")
+        origin.set_url(authenticated_url)
+        origin.push(refspec=f'{branch_name}:{branch_name}')
+
+        # Create a pull request
+        g = Github(GITHUB_TOKEN)
+        owner_repo = remote_url.split('/')[-2:]
+        owner, repo_name_from_url = owner_repo[0], owner_repo[1].replace('.git', '')
+        
+        gh_repo = g.get_repo(f"{owner}/{repo_name_from_url}")
+        pr = gh_repo.create_pull(title=pr_title, body=pr_body, head=branch_name, base=gh_repo.default_branch)
+
+        return {"status": "success", "pr_url": pr.html_url}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+def remove_local_repo(repo_name: str) -> dict:
+    """
+    Removes a local copy of a repository.
+
+    Args:
+        repo_name: The name of the repository to remove.
+
+    Returns:
+        A dictionary with a 'status' key ('success' or 'error') and a 'message' key.
+    """
+    local_path = checked_out_repos.pop(repo_name, None)
+    if not local_path:
+        return {"status": "error", "message": f"Repository '{repo_name}' not found."}
+
+    try:
+        shutil.rmtree(local_path)
+        return {"status": "success", "message": f"Repository '{repo_name}' removed successfully."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 root_agent = Agent(
     name="git_lsc_agent",
     model="gemini-2.0-flash",
     description="An agent that can list a user's GitHub repositories and check them out to a local directory.",
     instruction="I can help you list your GitHub repositories and check them out. Please provide the repository URL when you want to check out a repository. You can get the URL by listing the repositories first.",
-    tools=[list_repositories, checkout_repository, refactor_files_by_pattern]
+    tools=[list_repositories, checkout_repository, refactor_files_by_pattern, show_diff, commit_and_create_pr, remove_local_repo]
 )
